@@ -11,7 +11,15 @@ import {
 	type PriceProvider,
 	type SwapAsset
 } from '@vsc.eco/crosschain-sdk';
-import { calculateSwap, calculateTwoHopSwap, withSwapOpRcLimit } from '@vsc.eco/crosschain-core';
+import {
+	calculateSwap,
+	calculateTwoHopSwap,
+	calculatePriceImpact,
+	checkExceedsPoolDepth,
+	getOrderedDepthsFor,
+	withSwapOpRcLimit,
+	type BtcFeeEstimate
+} from '@vsc.eco/crosschain-sdk';
 import { validate as validateBtcAddr, Network as BtcNetwork } from 'bitcoin-address-validation';
 import magiIcon from './assets/magi.svg';
 import { TokenSelect } from './TokenSelect.js';
@@ -78,6 +86,8 @@ export function MagiQuickSwap(props: MagiQuickSwapProps) {
 		minAmountOut: bigint;
 		totalFee: bigint;
 		hops: 1 | 2;
+		priceImpactPct: number;
+		exceedsPoolDepth: boolean;
 		hop1Fee?: { asset: string; totalFee: bigint };
 	} | null>(null);
 	const [previewError, setPreviewError] = useState<string | null>(null);
@@ -127,6 +137,19 @@ export function MagiQuickSwap(props: MagiQuickSwapProps) {
 	}, [magi, preview?.hop1Fee]);
 
 	const isBtcInput = assetIn === 'BTC';
+	// Withdrawals that settle to a BTC mainnet address incur a Bitcoin network
+	// fee the contract deducts when it builds the unmap tx. Fetch the
+	// contract's current rate so we can show an approximate sat range.
+	const isToBtcMainnet = assetOut === 'BTC';
+	const [btcNetworkFee, setBtcNetworkFee] = useState<BtcFeeEstimate | null>(null);
+	useEffect(() => {
+		if (!isToBtcMainnet) { setBtcNetworkFee(null); return; }
+		let cancelled = false;
+		magi.estimateBtcUnmapFee()
+			.then((f) => { if (!cancelled) setBtcNetworkFee(f); })
+			.catch(() => { if (!cancelled) setBtcNetworkFee(null); });
+		return () => { cancelled = true; };
+	}, [isToBtcMainnet, magi]);
 
 	// Auto-query balance from Hive L1 when username is known
 	const [queriedBalance, setQueriedBalance] = useState<bigint | null>(null);
@@ -165,15 +188,25 @@ export function MagiQuickSwap(props: MagiQuickSwapProps) {
 					if (assetOut === 'HBD') {
 						const pool = await magi.pools.getPoolDepths('BTC', 'HBD');
 						if (!pool) { if (!cancelled) setPreviewError('No BTC/HBD pool found'); return; }
-						const X = pool.asset0 === 'btc' ? pool.reserve0 : pool.reserve1;
-						const Y = pool.asset0 === 'btc' ? pool.reserve1 : pool.reserve0;
-						const r = calculateSwap(amount.raw, X, Y, slippageBps);
-						if (!cancelled) setPreview({ ...r, hops: 1 });
+						const d = getOrderedDepthsFor(pool, 'btc');
+						if (!d) { if (!cancelled) setPreviewError('No BTC/HBD pool found'); return; }
+						const r = calculateSwap(amount.raw, d.X, d.Y, slippageBps);
+						if (!cancelled) setPreview({
+							...r, hops: 1,
+							priceImpactPct: calculatePriceImpact(amount.raw, d),
+							exceedsPoolDepth: checkExceedsPoolDepth(amount.raw, d)
+						});
 					} else if (assetOut === 'HIVE') {
 						const [p1, p2] = await Promise.all([magi.pools.getPoolDepths('BTC', 'HBD'), magi.pools.getPoolDepths('HBD', 'HIVE')]);
 						if (!p1 || !p2) { if (!cancelled) setPreviewError('Missing pool for BTC→HIVE route'); return; }
 						const r = calculateTwoHopSwap(amount.raw, p1, p2, 'btc', 'hbd', 'hive', slippageBps);
-						if (!cancelled) setPreview({ ...r, hops: 2 });
+						const hop1 = getOrderedDepthsFor(p1, 'btc');
+						const hop2 = getOrderedDepthsFor(p2, 'hbd');
+						if (!cancelled) setPreview({
+							...r, hops: 2,
+							priceImpactPct: calculatePriceImpact(amount.raw, hop1, hop2),
+							exceedsPoolDepth: checkExceedsPoolDepth(amount.raw, hop1, hop2)
+						});
 					}
 				} else {
 					const res = await magi.buildQuickSwap({
@@ -183,7 +216,15 @@ export function MagiQuickSwap(props: MagiQuickSwapProps) {
 						recipient: assetOut === 'BTC' ? 'bc1qpreviewplaceholderpreviewplaceholderxxxxxx' : (recipient || 'preview'),
 						slippageBps
 					});
-					if (!cancelled) setPreview({ expectedOutput: res.preview.expectedOutput, minAmountOut: res.preview.minAmountOut, totalFee: res.preview.totalFee, hops: res.preview.hops, hop1Fee: res.preview.hop1Fee ? { asset: res.preview.hop1Fee.asset, totalFee: res.preview.hop1Fee.totalFee } : undefined });
+					if (!cancelled) setPreview({
+						expectedOutput: res.preview.expectedOutput,
+						minAmountOut: res.preview.minAmountOut,
+						totalFee: res.preview.totalFee,
+						hops: res.preview.hops,
+						priceImpactPct: res.preview.priceImpactPct,
+						exceedsPoolDepth: res.preview.exceedsPoolDepth,
+						hop1Fee: res.preview.hop1Fee ? { asset: res.preview.hop1Fee.asset, totalFee: res.preview.hop1Fee.totalFee } : undefined
+					});
 				}
 			} catch (err) {
 				if (!cancelled) { setPreviewError(err instanceof Error ? err.message : String(err)); setPreview(null); }
@@ -207,9 +248,10 @@ export function MagiQuickSwap(props: MagiQuickSwapProps) {
 	const sameAsset = assetIn === assetOut;
 	const hasAmount = inputAmount > 0n;
 
+	const exceedsPoolDepth = !!preview && preview.exceedsPoolDepth;
 	const canSubmit = isBtcInput
-		? hasAmount && !sameAsset && recipientValid && !!preview && preview.expectedOutput > 0n && !submitting
-		: hasSigner && !!username && hasAmount && !sameAsset && recipientValid && !exceedsBalance && !!preview && preview.expectedOutput > 0n && !submitting;
+		? hasAmount && !sameAsset && recipientValid && !!preview && preview.expectedOutput > 0n && !exceedsPoolDepth && !submitting
+		: hasSigner && !!username && hasAmount && !sameAsset && recipientValid && !exceedsBalance && !!preview && preview.expectedOutput > 0n && !exceedsPoolDepth && !submitting;
 
 	const handleBtcDeposit = useCallback(async () => {
 		if (!canSubmit) return;
@@ -385,6 +427,7 @@ export function MagiQuickSwap(props: MagiQuickSwapProps) {
 			: !recipientValid ? 'Enter Hive account first'
 			: !hasAmount ? 'Enter amount'
 			: !preview || preview.expectedOutput === 0n ? 'No route available'
+			: exceedsPoolDepth ? 'Amount exceeds 50% of pool depth'
 			: 'Get deposit address'
 		: !hasSigner || !username ? 'Connect Hive wallet'
 		: sameAsset ? 'Pick a different To asset'
@@ -392,7 +435,18 @@ export function MagiQuickSwap(props: MagiQuickSwapProps) {
 		: !recipientValid ? assetOut === 'BTC' ? 'Enter a valid BTC address' : 'Enter a valid Hive username'
 		: exceedsBalance ? 'Insufficient balance'
 		: !preview || preview.expectedOutput === 0n ? 'No route available'
+		: exceedsPoolDepth ? 'Amount exceeds 50% of pool depth'
 		: 'Swap';
+
+	const priceImpactPct = preview && hasAmount && preview.expectedOutput > 0n ? preview.priceImpactPct : 0;
+	const priceImpactClass = priceImpactPct < 2 ? 'good' : priceImpactPct < 10 ? 'medium' : 'bad';
+
+	const btcNetworkFeeLabel = useMemo(() => {
+		if (!isToBtcMainnet || !btcNetworkFee) return null;
+		const min = new CoinAmount(BigInt(btcNetworkFee.minSats), 'BTC').toDecimalString();
+		const max = new CoinAmount(BigInt(btcNetworkFee.maxSats), 'BTC').toDecimalString();
+		return `~${min} – ${max} BTC`;
+	}, [isToBtcMainnet, btcNetworkFee]);
 
 	const toAmountLabel = preview ? new CoinAmount(preview.expectedOutput, assetOut).toDecimalString() : '0';
 	const fromOptions: SwapAsset[] = ['HIVE', 'HBD', 'BTC'];
@@ -494,13 +548,25 @@ export function MagiQuickSwap(props: MagiQuickSwapProps) {
 			{/* Details */}
 			<div className="magi-qs-details">
 				<div className="magi-qs-detail-row"><span className="magi-qs-detail-label">Rate</span><span className="magi-qs-detail-value">{rateLabel}</span></div>
-				<div className="magi-qs-detail-row"><span className="magi-qs-detail-label">Fee</span><span className="magi-qs-detail-value">{feeLabel}</span></div>
+				<div className="magi-qs-detail-row"><span className="magi-qs-detail-label">Max fee</span><span className="magi-qs-detail-value">{feeLabel}</span></div>
+				{btcNetworkFeeLabel && (
+					<div className="magi-qs-detail-row"><span className="magi-qs-detail-label">BTC network fee</span><span className="magi-qs-detail-value">{btcNetworkFeeLabel}</span></div>
+				)}
+				{preview && hasAmount && preview.expectedOutput > 0n && (
+					<div className="magi-qs-detail-row"><span className="magi-qs-detail-label">Price impact</span><span className={`magi-qs-detail-value impact ${priceImpactClass}`}>{priceImpactPct.toFixed(2)}%</span></div>
+				)}
 				<div className="magi-qs-detail-row"><span className="magi-qs-detail-label">Min received</span><span className="magi-qs-detail-value">{minReceivedLabel}</span></div>
 				<div className="magi-qs-detail-row"><span className="magi-qs-detail-label">Route</span><span className="magi-qs-detail-value route">{routeLabel}</span></div>
 			</div>
 
 			{sameAsset && <p className="magi-qs-status error">From and To assets must be different.</p>}
 			{exceedsBalance && <p className="magi-qs-status error">Amount exceeds your wallet balance.</p>}
+			{exceedsPoolDepth && <p className="magi-qs-status error">Amount exceeds 50% of pool depth — reduce the amount to continue.</p>}
+			{!exceedsPoolDepth && priceImpactPct >= 10 && (
+				<p className={`magi-qs-status ${priceImpactPct >= 15 ? 'error' : 'warn'}`}>
+					{priceImpactPct >= 15 ? 'Very high' : 'High'} price impact ({priceImpactPct.toFixed(2)}%) — you may receive significantly less than the market rate.
+				</p>
+			)}
 			{previewError && <p className="magi-qs-status error">{previewError}</p>}
 			{error && <p className="magi-qs-status error">{error}</p>}
 			{btcDepositError && <p className="magi-qs-status error">{btcDepositError}</p>}

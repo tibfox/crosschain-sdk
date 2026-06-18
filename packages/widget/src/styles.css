@@ -13,6 +13,7 @@
 	--magi-accent-light: rgba(79, 70, 229, 0.08);
 	--magi-green: #16a34a;
 	--magi-red: #dc2626;
+	--magi-amber: #d97706;
 	--magi-text: #111827;
 	--magi-text-secondary: #4b5563;
 	--magi-text-muted: #9ca3af;
@@ -574,6 +575,19 @@
 	font-weight: 600;
 }
 
+.magi-qs-detail-value.impact {
+	font-weight: 600;
+}
+.magi-qs-detail-value.impact.good {
+	color: var(--magi-green);
+}
+.magi-qs-detail-value.impact.medium {
+	color: var(--magi-amber);
+}
+.magi-qs-detail-value.impact.bad {
+	color: var(--magi-red);
+}
+
 /* Status + submit */
 .magi-qs-status {
 	text-align: center;
@@ -584,6 +598,10 @@
 
 .magi-qs-status.error {
 	color: var(--magi-red);
+}
+
+.magi-qs-status.warn {
+	color: var(--magi-amber);
 }
 
 .magi-qs-submit {
