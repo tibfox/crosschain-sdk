@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { CoinAmount } from '../src/currency/CoinAmount.js';
-import { getHiveDepositOp, getHiveSwapOp, referralQualifies } from '../src/ops/swap.js';
+import {
+	getHiveDepositOp,
+	getHiveSwapOp,
+	getBtcApproveOp,
+	referralQualifies
+} from '../src/ops/swap.js';
 import { MAINNET_CONFIG } from '../src/types/index.js';
 
 /**
@@ -212,5 +217,42 @@ describe('referralQualifies', () => {
 		expect(
 			referralQualifies({ assetOut: 'BTC', destinationChain: 'BTC', inputUsd: 500, referral: null })
 		).toBe(false);
+	});
+});
+
+describe('getBtcApproveOp', () => {
+	it('emits an increaseAllowance custom_json granting the DEX router sats allowance', () => {
+		const op = getBtcApproveOp({
+			username: 'alice',
+			amount: CoinAmount.fromDecimal('0.001', 'BTC'), // 100000 sats
+			config: MAINNET_CONFIG
+		});
+		expect(op[0]).toBe('custom_json');
+		expect(op[1].required_auths).toEqual(['alice']);
+		expect(op[1].id).toBe('vsc.call');
+
+		const outer = JSON.parse(op[1].json);
+		expect(outer.net_id).toBe('vsc-mainnet');
+		expect(outer.caller).toBe('hive:alice');
+		expect(outer.contract_id).toBe(MAINNET_CONFIG.btcMappingContractId);
+		expect(outer.action).toBe('increaseAllowance');
+		expect(outer.rc_limit).toBe(1_000);
+		expect(outer.intents).toEqual([]);
+
+		const payload = JSON.parse(outer.payload);
+		expect(payload).toEqual({
+			spender: `contract:${MAINNET_CONFIG.dexRouterContractId}`,
+			amount: '100000'
+		});
+	});
+
+	it('rejects a non-BTC amount', () => {
+		expect(() =>
+			getBtcApproveOp({
+				username: 'alice',
+				amount: CoinAmount.fromDecimal('1', 'HBD'),
+				config: MAINNET_CONFIG
+			})
+		).toThrow(/asset must be BTC/);
 	});
 });

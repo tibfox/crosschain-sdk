@@ -79,9 +79,15 @@ export interface PoolDepths {
 }
 
 export interface SwapCalcResult {
+	/** Charged protocol fee at the stabilizer cap (= base × 2). Unmultiplied
+	 *  base fee is `baseFee / 2`. See `calculateSwap`. */
 	baseFee: bigint;
+	/** Charged CLP fee at the stabilizer cap (= base × 2). */
 	clpFee: bigint;
+	/** `baseFee + clpFee` — total charged fee at the worst-case m = 2.0. */
 	totalFee: bigint;
+	/** Net output assuming worst-case stabilizer (m = 2.0); a guaranteed
+	 *  floor over any real on-chain m ∈ [1, 2]. */
 	expectedOutput: bigint;
 	minAmountOut: bigint;
 	slippageBps: number;

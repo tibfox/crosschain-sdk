@@ -3,6 +3,21 @@ import { CoinAmount } from '../currency/CoinAmount.js';
 import type { DestinationChain, MagiConfig, ReferralConfig, SwapAsset } from '../types/index.js';
 
 /**
+ * Altera's exchange-fee referral preset. Inert by default — both `MAINNET_CONFIG`
+ * and `TESTNET_CONFIG` ship `referral: null`, mirroring altera-app's
+ * `ALTERA_FEE_ACTIVE = false`. Hosts that want to charge the Altera fee can pass
+ * this as `config.referral`. `bps: 25` = 0.25%; it only applies to non-HIVE/HBD
+ * (i.e. BTC) outbound swaps with a destination chain set — see `referralQualifies`.
+ * Mirrors `ALTERA_FEE_BENEFICIARY` / `ALTERA_FEE_BPS` / `ALTERA_FEE_USD_THRESHOLD`
+ * in altera-app/src/lib/magiTransactions/hive/vscOperations/swap.ts.
+ */
+export const ALTERA_REFERRAL: ReferralConfig = {
+	beneficiary: 'hive:altera.app',
+	bps: 25,
+	usdThreshold: 0
+};
+
+/**
  * Build the L1 → Magi deposit operation. Sends `amount` of HIVE or HBD from
  * the user's Hive L1 account to the Magi gateway account with a memo that
  * tells the gateway to credit `toDid` on Magi.
@@ -35,6 +50,54 @@ export function getHiveDepositOp(params: {
 			to: config.gatewayAccount,
 			amount: `${amount.toDecimalString()} ${chainUnit}`,
 			memo: memo.toString()
+		}
+	];
+}
+
+/**
+ * Grant the DEX router allowance to spend exactly `amount` BTC (in sats) on the
+ * BTC-mapping contract, so a BTC-input swap op can pull it. Uses
+ * `increaseAllowance` (additive per op, matched to the swap amount) rather than
+ * approving an arbitrarily large number. Emit this BEFORE `getHiveSwapOp` in the
+ * same tx when `assetIn` is BTC.
+ *
+ * `CoinAmount.raw` for BTC is already in sats (decimals = 8), so it's passed
+ * through as the base-unit value the contract expects.
+ *
+ * Ported from altera-app/src/lib/magiTransactions/hive/vscOperations/swap.ts
+ * (`getBtcApproveOp`).
+ */
+export function getBtcApproveOp(params: {
+	username: string;
+	amount: CoinAmount;
+	config: MagiConfig;
+	/** Override the op's `rc_limit` (default 1000, matching Altera). */
+	rcLimit?: number;
+}): CustomJsonOperation {
+	const { username, amount, config, rcLimit } = params;
+	if (amount.asset !== 'BTC') {
+		throw new Error(`getBtcApproveOp: asset must be BTC, got ${amount.asset}`);
+	}
+	const caller = `hive:${username}`;
+	const op = {
+		net_id: config.network,
+		caller,
+		contract_id: config.btcMappingContractId,
+		action: 'increaseAllowance',
+		payload: JSON.stringify({
+			spender: `contract:${config.dexRouterContractId}`,
+			amount: amount.raw.toString()
+		}),
+		rc_limit: rcLimit ?? 1000,
+		intents: [] as Array<{ type: string; args: Record<string, string> }>
+	};
+	return [
+		'custom_json',
+		{
+			required_auths: [username],
+			required_posting_auths: [],
+			id: 'vsc.call',
+			json: JSON.stringify(op)
 		}
 	];
 }
