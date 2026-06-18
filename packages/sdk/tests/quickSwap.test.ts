@@ -100,6 +100,47 @@ describe('createMagi + buildQuickSwap', () => {
 		expect(inner.recipient).toBe('hive:vaultec');
 	});
 
+	it('exposes priceImpactPct + exceedsPoolDepth on the preview (single-hop)', async () => {
+		const magi = createMagi({ pools: mockPools() });
+		const res = await magi.buildQuickSwap({
+			username: 'vaultec',
+			assetIn: 'HBD',
+			amountIn: CoinAmount.fromDecimal('10', 'HBD'), // 10000 into HBD reserve 610105
+			assetOut: 'BTC',
+			recipient: 'bc1q5hnuykyu0ejkwktheh5mq2v9dp2y3674ep0kss',
+			slippageBps: 100
+		});
+		// impact = 10000 / (610105 + 10000) ≈ 1.613%
+		expect(res.preview.priceImpactPct).toBeCloseTo(1.613, 2);
+		expect(res.preview.exceedsPoolDepth).toBe(false);
+	});
+
+	it('flags exceedsPoolDepth when input is over 50% of the input reserve', async () => {
+		const magi = createMagi({ pools: mockPools() });
+		const res = await magi.buildQuickSwap({
+			username: 'vaultec',
+			assetIn: 'HBD',
+			amountIn: CoinAmount.fromDecimal('400', 'HBD'), // 400000 * 2 > 610105
+			assetOut: 'BTC',
+			recipient: 'bc1q5hnuykyu0ejkwktheh5mq2v9dp2y3674ep0kss'
+		});
+		expect(res.preview.exceedsPoolDepth).toBe(true);
+	});
+
+	it('computes a compounded price impact on the two-hop route', async () => {
+		const magi = createMagi({ pools: mockPools() });
+		const res = await magi.buildQuickSwap({
+			username: 'lordbutterfly',
+			assetIn: 'HIVE',
+			amountIn: CoinAmount.fromDecimal('30', 'HIVE'),
+			assetOut: 'BTC',
+			recipient: 'bc1qexampleexampleexampleexampleexamplexxyz'
+		});
+		expect(res.preview.hops).toBe(2);
+		expect(res.preview.priceImpactPct).toBeGreaterThan(0);
+		expect(res.preview.exceedsPoolDepth).toBe(false);
+	});
+
 	it('rejects same-asset swap', async () => {
 		const magi = createMagi({ pools: mockPools() });
 		await expect(

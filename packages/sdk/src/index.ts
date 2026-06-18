@@ -57,7 +57,7 @@ export { createDefaultPoolProvider } from './poolProvider.js';
 export { createPoolPriceProvider } from './priceProvider.js';
 export { createHiveBalanceProvider } from './balanceProvider.js';
 export { getStateByKeys, hexToBigInt, hexToBytes } from './chainState.js';
-export { estimateBtcUnmapFee, fetchBtcBaseFeeRate } from './btcFee.js';
+export { estimateBtcUnmapFee, fetchBtcBaseFeeRate, btcUnmapFeeForRate } from './btcFee.js';
 export type { PoolProvider } from './poolProvider.js';
 export type { PriceProvider } from './priceProvider.js';
 export type { BalanceProvider } from './balanceProvider.js';

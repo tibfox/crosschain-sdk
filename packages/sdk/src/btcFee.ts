@@ -51,6 +51,20 @@ export interface BtcFeeEstimate {
 	maxSats: number;
 }
 
+/**
+ * Pure: turn a raw `BaseFeeRate` (sat/vbyte) into the clamped rate and the
+ * [1-input, 3-input] sat fee range. Split out from the network fetch so it can
+ * be unit-tested without a node. Exposed for that reason.
+ */
+export function btcUnmapFeeForRate(rate: number): BtcFeeEstimate {
+	const clamped = clampedFeeRate(rate);
+	return {
+		feeRate: clamped,
+		minSats: estimateBaseFeeSats(1, clamped),
+		maxSats: estimateBaseFeeSats(3, clamped)
+	};
+}
+
 /** Read the contract's current `BaseFeeRate` (sat/vbyte), or null on failure. */
 export async function fetchBtcBaseFeeRate(config: MagiConfig): Promise<number | null> {
 	try {
@@ -76,10 +90,5 @@ export async function fetchBtcBaseFeeRate(config: MagiConfig): Promise<number | 
 export async function estimateBtcUnmapFee(config: MagiConfig): Promise<BtcFeeEstimate | null> {
 	const feeRate = await fetchBtcBaseFeeRate(config);
 	if (feeRate == null) return null;
-	const clamped = clampedFeeRate(feeRate);
-	return {
-		feeRate: clamped,
-		minSats: estimateBaseFeeSats(1, clamped),
-		maxSats: estimateBaseFeeSats(3, clamped)
-	};
+	return btcUnmapFeeForRate(feeRate);
 }
