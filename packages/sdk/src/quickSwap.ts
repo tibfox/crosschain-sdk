@@ -2,11 +2,14 @@ import {
 	CoinAmount,
 	calculateSwap,
 	calculateTwoHopSwap,
+	calculatePriceImpact,
+	checkExceedsPoolDepth,
 	getHiveDepositOp,
 	getHiveSwapOp,
 	referralQualifies,
 	type DestinationChain,
 	type MagiConfig,
+	type OrderedDepths,
 	type PoolDepths,
 	type SwapAsset,
 	type SwapCalcResult
@@ -23,10 +26,21 @@ export interface QuickSwapInput {
 	slippageBps?: number;
 }
 
+/**
+ * Swap preview: the fee/output math plus route metadata and the two guards a
+ * UI needs — `priceImpactPct` (0–100) and `exceedsPoolDepth` (input over 50 %
+ * of an input-side reserve, which the contract hard-rejects).
+ */
+export type SwapPreview = SwapCalcResult & {
+	hops: 1 | 2;
+	priceImpactPct: number;
+	exceedsPoolDepth: boolean;
+};
+
 export interface QuickSwapBuildResult {
 	/** `[depositOp, swapOp]` — pass to Aioha's signAndBroadcastTx. */
 	ops: unknown[];
-	preview: SwapCalcResult & { hops: 1 | 2 };
+	preview: SwapPreview;
 	/** True when the referral branch was taken and fee fields were added. */
 	referralApplied: boolean;
 }
@@ -125,20 +139,36 @@ function normalizeRecipient(assetOut: SwapAsset, recipient: string): string {
 	return `hive:${trimmed}`;
 }
 
+const ZERO_CALC: SwapCalcResult = {
+	baseFee: 0n,
+	clpFee: 0n,
+	totalFee: 0n,
+	expectedOutput: 0n,
+	minAmountOut: 0n,
+	slippageBps: 0
+};
+
 async function previewSwap(
 	amountIn: CoinAmount,
 	assetIn: SwapAsset,
 	assetOut: SwapAsset,
 	slippageBps: number,
 	pools: PoolProvider
-): Promise<SwapCalcResult & { hops: 1 | 2 }> {
+): Promise<SwapPreview> {
+	const x = amountIn.raw;
+
 	// Try direct pool first.
 	const direct = await pools.getPoolDepths(assetIn, assetOut);
 	if (direct) {
 		const d = orderedDepths(direct, assetIn);
 		if (d) {
-			const r = calculateSwap(amountIn.raw, d.X, d.Y, slippageBps);
-			return { ...r, hops: 1 };
+			const r = calculateSwap(x, d.X, d.Y, slippageBps);
+			return {
+				...r,
+				hops: 1,
+				priceImpactPct: calculatePriceImpact(x, d),
+				exceedsPoolDepth: checkExceedsPoolDepth(x, d)
+			};
 		}
 	}
 
@@ -148,33 +178,17 @@ async function previewSwap(
 	const hop2Asset = assetOut;
 	if (hop1Asset === hopMid || hop2Asset === hopMid) {
 		// Direct-pool case should have been found above; fall through.
-		return {
-			baseFee: 0n,
-			clpFee: 0n,
-			totalFee: 0n,
-			expectedOutput: 0n,
-			minAmountOut: 0n,
-			slippageBps,
-			hops: 1
-		};
+		return { ...ZERO_CALC, slippageBps, hops: 1, priceImpactPct: 0, exceedsPoolDepth: false };
 	}
 	const [pool1, pool2] = await Promise.all([
 		pools.getPoolDepths(hop1Asset, hopMid),
 		pools.getPoolDepths(hopMid, hop2Asset)
 	]);
 	if (!pool1 || !pool2) {
-		return {
-			baseFee: 0n,
-			clpFee: 0n,
-			totalFee: 0n,
-			expectedOutput: 0n,
-			minAmountOut: 0n,
-			slippageBps,
-			hops: 2
-		};
+		return { ...ZERO_CALC, slippageBps, hops: 2, priceImpactPct: 0, exceedsPoolDepth: false };
 	}
 	const r = calculateTwoHopSwap(
-		amountIn.raw,
+		x,
 		pool1,
 		pool2,
 		assetIn.toLowerCase(),
@@ -182,7 +196,14 @@ async function previewSwap(
 		assetOut.toLowerCase(),
 		slippageBps
 	);
-	return { ...r, hops: 2 };
+	const hop1: OrderedDepths | null = orderedDepths(pool1, assetIn);
+	const hop2: OrderedDepths | null = orderedDepths(pool2, hopMid);
+	return {
+		...r,
+		hops: 2,
+		priceImpactPct: calculatePriceImpact(x, hop1, hop2),
+		exceedsPoolDepth: checkExceedsPoolDepth(x, hop1, hop2)
+	};
 }
 
 function orderedDepths(depths: PoolDepths, assetIn: string): { X: bigint; Y: bigint } | null {

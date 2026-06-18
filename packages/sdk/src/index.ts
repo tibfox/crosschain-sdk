@@ -14,6 +14,7 @@ import {
 	type BtcDepositResult
 } from './mappingBot.js';
 import { createHiveBalanceProvider, type BalanceProvider } from './balanceProvider.js';
+import { estimateBtcUnmapFee, type BtcFeeEstimate } from './btcFee.js';
 import {
 	checkSwapRc,
 	computeBroadcastRcLimit,
@@ -32,17 +33,37 @@ export type {
 	MagiConfig,
 	SwapAsset,
 	ReferralConfig,
-	SwapCalcResult
+	SwapCalcResult,
+	OrderedDepths
 } from '@vsc.eco/crosschain-core';
 export { CoinAmount } from '@vsc.eco/crosschain-core';
+// Re-export the pure swap math + op builders + presets so widget/host code can
+// import everything from the SDK entry point.
+export {
+	calculateSwap,
+	calculateTwoHopSwap,
+	calculatePriceImpact,
+	checkExceedsPoolDepth,
+	getOrderedDepthsFor,
+	STABILIZER_CAP_BPS,
+	getHiveDepositOp,
+	getHiveSwapOp,
+	getBtcApproveOp,
+	referralQualifies,
+	withSwapOpRcLimit,
+	ALTERA_REFERRAL
+} from '@vsc.eco/crosschain-core';
 export { createDefaultPoolProvider } from './poolProvider.js';
 export { createPoolPriceProvider } from './priceProvider.js';
 export { createHiveBalanceProvider } from './balanceProvider.js';
+export { getStateByKeys, hexToBigInt, hexToBytes } from './chainState.js';
+export { estimateBtcUnmapFee, fetchBtcBaseFeeRate } from './btcFee.js';
 export type { PoolProvider } from './poolProvider.js';
 export type { PriceProvider } from './priceProvider.js';
 export type { BalanceProvider } from './balanceProvider.js';
-export type { QuickSwapInput, QuickSwapBuildResult } from './quickSwap.js';
+export type { QuickSwapInput, QuickSwapBuildResult, SwapPreview } from './quickSwap.js';
 export type { BtcDepositRequest, BtcDepositResult } from './mappingBot.js';
+export type { BtcFeeEstimate } from './btcFee.js';
 export {
 	checkSwapRc,
 	computeBroadcastRcLimit,
@@ -88,6 +109,9 @@ export interface MagiClient {
 		username: string;
 		build: QuickSwapBuildResult;
 	}) => Promise<RcCheckResult>;
+	/** Approximate BTC network-fee range (sats) for a withdrawal to a BTC
+	 *  mainnet address. Null when the contract fee rate can't be read. */
+	estimateBtcUnmapFee: () => Promise<BtcFeeEstimate | null>;
 }
 
 export interface QuickSwapResult {
@@ -102,7 +126,7 @@ export interface QuickSwapResult {
 
 export function createMagi(opts: CreateMagiOptions = {}): MagiClient {
 	const config = opts.config ?? MAINNET_CONFIG;
-	const pools = opts.pools ?? createDefaultPoolProvider(undefined, config.indexerUrl);
+	const pools = opts.pools ?? createDefaultPoolProvider(config);
 	const prices = opts.prices;
 	const balances = opts.balances ?? createHiveBalanceProvider();
 	const aioha = opts.aioha;
@@ -164,6 +188,9 @@ export function createMagi(opts: CreateMagiOptions = {}): MagiClient {
 		async checkSwapRc({ username, build }) {
 			const call = simCallFromSwapOp(build.ops[build.ops.length - 1]);
 			return checkSwapRc(config, { username, call });
+		},
+		async estimateBtcUnmapFee() {
+			return estimateBtcUnmapFee(config);
 		}
 	};
 }
